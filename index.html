@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kledingadvies op maat – Chat met je Personal Stylist</title>
+  <style>
+    :root { --bg:#0b0b0c; --panel:#131316; --text:#f5f6f7; --muted:#b4b7bd; --accent:#65b8ff; }
+    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial}
+    .wrap{max-width:920px;margin:0 auto;padding:24px}
+    .hero{background:linear-gradient(145deg,#12121a,#0d0d13);border:1px solid #1f2230;border-radius:18px;padding:20px 20px 12px}
+    h1{margin:0 0 8px;font-size:28px}
+    p{color:var(--muted);line-height:1.55}
+    .bar{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+    button, .btn{
+      background:var(--accent);color:#09111a;border:0;border-radius:14px;
+      padding:12px 16px;font-weight:700;cursor:pointer;font-size:16px
+    }
+    .chat{margin-top:18px;background:var(--panel);border:1px solid #1f2230;border-radius:18px;min-height:420px;display:flex;flex-direction:column}
+    .msgs{padding:16px;overflow:auto;flex:1}
+    .msg{padding:12px 14px;border-radius:14px;max-width:78%;margin:8px 0;white-space:pre-wrap;line-height:1.45}
+    .me{background:#1a2430;margin-left:auto;border:1px solid #243245}
+    .ai{background:#121822;border:1px solid #1f2b3a}
+    .input{display:flex;gap:10px;padding:12px;border-top:1px solid #1f2230}
+    textarea{
+      flex:1;background:#0e1118;color:var(--text);border:1px solid #22293a;border-radius:12px;
+      padding:12px;font-size:16px;min-height:56px;resize:vertical
+    }
+    .small{font-size:13px;color:var(--muted)}
+    .pill{display:inline-block;font-size:12px;border:1px solid #2a3246;border-radius:999px;padding:6px 10px;color:#c7cbd3;margin-right:6px}
+    /* Links in berichten duidelijk klikbaar */
+    .msg a{ color:#95d2ff; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <h1>Jouw Online Personal Stylist 👗</h1>
+      <p>Ik ben je <strong>Nederlandse</strong> stylist (v, 32, mode-achtergrond). 
+        Ik stel <strong>één-voor-één</strong> vragen en geef daarna concrete <strong>outfits</strong> met <strong>links</strong> naar NL webshops.</p>
+      <div class="bar">
+        <button id="start">Start intake</button>
+        <span class="pill">Privacy: data blijft in deze sessie</span>
+        <span class="pill">Demo</span>
+      </div>
+    </div>
+
+    <div class="chat" aria-live="polite">
+      <div id="msgs" class="msgs"></div>
+      <form id="form" class="input">
+        <textarea id="text" placeholder="Typ je bericht… (Ctrl+Enter om te verzenden)"></textarea>
+        <button type="submit">Verstuur</button>
+      </form>
+    </div>
+  </div>
+
+<script>
+
+/* --- NL shop zoek-URL mapping --- */
+const SHOP_SEARCH = {
+  "Zalando": (q) => `https://www.zalando.nl/catalogus/?q=${encodeURIComponent(q)}`,
+  "H&M": (q) => `https://www2.hm.com/nl_nl/search-results.html?q=${encodeURIComponent(q)}`,
+  "WE Fashion": (q) => `https://www.wefashion.nl/nl_NL/search?q=${encodeURIComponent(q)}`,
+  "Zara": (q) => `https://www.zara.com/nl/en/search?searchTerm=${encodeURIComponent(q)}`,
+  "Bever": (q) => `https://www.bever.nl/search?q=${encodeURIComponent(q)}`,
+  "de Bijenkorf": (q) => `https://www.debijenkorf.nl/search?query=${encodeURIComponent(q)}`
+};
+
+/* Vervang speciale Markdown-links van de vorm: [Titel – (Winkel)](search:Winkel:Query) */
+function replaceSearchScheme(markdown) {
+  return markdown.replace(/\[([^\]]+)\]\(search:([^:]+):\s*([^\)]+)\)/g, (m, title, shop, query) => {
+    shop = shop.trim();
+    query = query.trim();
+    const toUrl = SHOP_SEARCH[shop];
+    const url = toUrl ? toUrl(query) : `https://www.google.com/search?q=${encodeURIComponent(`${shop} ${query}`)}`;
+    return `<a href="${url}" target="_blank" rel="noopener noreferrer">${title}</a>`;
+  });
+}
+/* --- Systeeminstructie (mag je ook via ENV 'SYSTEM_PROMPT' op server zetten) --- */
+const SYSTEM_PROMPT = `Je bent een 32-jarige vrouwelijke personal stylist & personal shopper (NL).
+Stel telkens 1 vraag per beurt. Vraag naar: geslacht, leeftijd, lichaamsbouw, confectiematen, stijlpersoonlijkheid, gelegenheid, gevoel, voorkeuren, praktisch, budget.
+Vat intake samen, geef 2–3 outfits, en noem concrete items. Gebruik ALLEEN deze NL-winkels: Zalando, H&M, WE Fashion, Zara, Bever, de Bijenkorf. Maak per item een Markdown-link met speciaal schema i.p.v. echte URL: [Titel – (Winkel)](search:Winkel:Productnaam).`;
+
+/* --- Chatgeschiedenis --- */
+let history = [
+  { role: "system", content: SYSTEM_PROMPT },
+  { role: "assistant", content: "Leuk dat je stylingadvies zoekt! Om te starten: wat is je **geslacht** (man of vrouw)?" }
+];
+
+const msgs = document.getElementById('msgs');
+const form = document.getElementById('form');
+const text = document.getElementById('text');
+const startBtn = document.getElementById('start');
+
+/* --- Eenvoudige, veilige Markdown → HTML (links/vet/italic/heads) --- */
+function escapeHTML(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function mdToHtml(md){
+  let s = escapeHTML(md);
+
+  // kopjes: ### title  → <strong>title</strong>
+  s = s.replace(/^### (.*)$/gm, '<strong>$1</strong>');
+
+  // vet en cursief
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+
+  // Markdown links: [titel](https://…)
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+  // Nieuwe regels → <br>
+  s = s.replace(/\n/g, '<br>');
+  s = replaceSearchScheme(s);
+  return s;
+}
+
+/* --- Render gebruikt nu Markdown-conversie --- */
+function render(role, content){
+  const div = document.createElement('div');
+  div.className = `msg ${role === 'user' ? 'me' : 'ai'}`;
+  div.innerHTML = mdToHtml(content); // Markdown → HTML
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function setLoading(on){
+  if(on){
+    render('assistant','… aan het nadenken …');
+  } else {
+    const nodes = [...msgs.querySelectorAll('.msg')];
+    const last = nodes[nodes.length-1];
+    if(last && last.textContent.includes('… aan het nadenken …')) last.remove();
+  }
+}
+
+/* --- Verzenden / backend aanroepen --- */
+async function send(content){
+  render('user', content);
+  const payload = { messages: history.concat([{ role: "user", content }]) };
+  setLoading(true);
+  try{
+    const res = await fetch('/.netlify/functions/chat', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    setLoading(false);
+
+    if (!res.ok || data.error) {
+      render('assistant', `⚠️ ${data?.error || `Serverfout (${res.status})`}`);
+      return;
+    }
+
+    const reply = data.reply || '(geen antwoord)';
+    render('assistant', reply);
+    history = data.history;
+  }catch(e){
+    setLoading(false);
+    render('assistant', `⚠️ Netwerkfout: ${e.message || e}`);
+  }
+}
+
+/* --- UI events --- */
+form.addEventListener('submit', (e)=>{
+  e.preventDefault();
+  const val = text.value.trim();
+  if(!val) return;
+  text.value = '';
+  send(val);
+});
+
+startBtn.addEventListener('click', ()=>{
+  render('assistant', 'Leuk dat je stylingadvies zoekt! Wat is je **geslacht** (man of vrouw)?');
+});
+
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'Enter' && (e.ctrlKey || e.metaKey)){
+    e.preventDefault();
+    if(text.value.trim()) form.requestSubmit();
+  }
+});
+
+/* --- Eerste bericht renderen --- */
+render('assistant', history[1].content);
+</script>
+</body>
+</html>
+<!doctype html>
+<html lang="nl">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Kledingadvies op maat – Chat met je Personal Stylist</title>
+  <style>
+    :root { --bg:#0b0b0c; --panel:#131316; --text:#f5f6f7; --muted:#b4b7bd; --accent:#65b8ff; }
+    body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial}
+    .wrap{max-width:920px;margin:0 auto;padding:24px}
+    .hero{background:linear-gradient(145deg,#12121a,#0d0d13);border:1px solid #1f2230;border-radius:18px;padding:20px 20px 12px}
+    h1{margin:0 0 8px;font-size:28px}
+    p{color:var(--muted);line-height:1.55}
+    .bar{display:flex;gap:12px;flex-wrap:wrap;margin-top:14px}
+    button, .btn{
+      background:var(--accent);color:#09111a;border:0;border-radius:14px;
+      padding:12px 16px;font-weight:700;cursor:pointer;font-size:16px
+    }
+    .chat{margin-top:18px;background:var(--panel);border:1px solid #1f2230;border-radius:18px;min-height:420px;display:flex;flex-direction:column}
+    .msgs{padding:16px;overflow:auto;flex:1}
+    .msg{padding:12px 14px;border-radius:14px;max-width:78%;margin:8px 0;white-space:pre-wrap;line-height:1.45}
+    .me{background:#1a2430;margin-left:auto;border:1px solid #243245}
+    .ai{background:#121822;border:1px solid #1f2b3a}
+    .input{display:flex;gap:10px;padding:12px;border-top:1px solid #1f2230}
+    textarea{
+      flex:1;background:#0e1118;color:var(--text);border:1px solid #22293a;border-radius:12px;
+      padding:12px;font-size:16px;min-height:56px;resize:vertical
+    }
+    .small{font-size:13px;color:var(--muted)}
+    .pill{display:inline-block;font-size:12px;border:1px solid #2a3246;border-radius:999px;padding:6px 10px;color:#c7cbd3;margin-right:6px}
+    /* Links in berichten duidelijk klikbaar */
+    .msg a{ color:#95d2ff; text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="hero">
+      <h1>Jouw Online Personal Stylist 👗</h1>
+      <p>Ik ben je <strong>Nederlandse</strong> stylist (v, 32, mode-achtergrond). 
+        Ik stel <strong>één-voor-één</strong> vragen en geef daarna concrete <strong>outfits</strong> met <strong>links</strong> naar NL webshops.</p>
+      <div class="bar">
+        <button id="start">Start intake</button>
+        <span class="pill">Privacy: data blijft in deze sessie</span>
+        <span class="pill">Demo</span>
+      </div>
+    </div>
+
+    <div class="chat" aria-live="polite">
+      <div id="msgs" class="msgs"></div>
+      <form id="form" class="input">
+        <textarea id="text" placeholder="Typ je bericht… (Ctrl+Enter om te verzenden)"></textarea>
+        <button type="submit">Verstuur</button>
+      </form>
+    </div>
+  </div>
+
+<script>
+/* --- Systeeminstructie (mag je ook via ENV 'SYSTEM_PROMPT' op server zetten) --- */
+const SYSTEM_PROMPT = `Je bent een 32-jarige vrouwelijke personal stylist & personal shopper (NL).
+Stel telkens 1 vraag per beurt. Vraag naar: geslacht, leeftijd, lichaamsbouw, confectiematen, stijlpersoonlijkheid, gelegenheid, gevoel, voorkeuren, praktisch, budget.
+Vat intake samen, geef 2–3 outfits, en noem concrete items. Gebruik ALLEEN deze NL-winkels: Zalando, H&M, WE Fashion, Zara, Bever, de Bijenkorf. Maak per item een Markdown-link met speciaal schema i.p.v. echte URL: [Titel – (Winkel)](search:Winkel:Productnaam).`;
+
+/* --- Chatgeschiedenis --- */
+let history = [
+  { role: "system", content: SYSTEM_PROMPT },
+  { role: "assistant", content: "Leuk dat je stylingadvies zoekt! Om te starten: wat is je **geslacht** (man of vrouw)?" }
+];
+
+const msgs = document.getElementById('msgs');
+const form = document.getElementById('form');
+const text = document.getElementById('text');
+const startBtn = document.getElementById('start');
+
+/* --- Eenvoudige, veilige Markdown → HTML (links/vet/italic/heads) --- */
+function escapeHTML(s){
+  return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+function mdToHtml(md){
+  let s = escapeHTML(md);
+
+  // kopjes: ### title  → <strong>title</strong>
+  s = s.replace(/^### (.*)$/gm, '<strong>$1</strong>');
+
+  // vet en cursief
+  s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*([^*]+)\*/g, '<em>$1</em>');
+
+  // Markdown links: [titel](https://…)
+  s = s.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+
+  // Nieuwe regels → <br>
+  s = s.replace(/\n/g, '<br>');
+  return s;
+}
+
+/* --- Render gebruikt nu Markdown-conversie --- */
+function render(role, content){
+  const div = document.createElement('div');
+  div.className = `msg ${role === 'user' ? 'me' : 'ai'}`;
+  div.innerHTML = mdToHtml(content); // Markdown → HTML
+  msgs.appendChild(div);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function setLoading(on){
+  if(on){
+    render('assistant','… aan het nadenken …');
+  } else {
+    const nodes = [...msgs.querySelectorAll('.msg')];
+    const last = nodes[nodes.length-1];
+    if(last && last.textContent.includes('… aan het nadenken …')) last.remove();
+  }
+}
+
+/* --- Verzenden / backend aanroepen --- */
+async function send(content){
+  render('user', content);
+  const payload = { messages: history.concat([{ role: "user", content }]) };
+  setLoading(true);
+  try{
+    const res = await fetch('/.netlify/functions/chat', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json().catch(() => ({}));
+    setLoading(false);
+
+    if (!res.ok || data.error) {
+      render('assistant', `⚠️ ${data?.error || `Serverfout (${res.status})`}`);
+      return;
+    }
+
+    const reply = data.reply || '(geen antwoord)';
+    render('assistant', reply);
+    history = data.history;
+  }catch(e){
+    setLoading(false);
+    render('assistant', `⚠️ Netwerkfout: ${e.message || e}`);
+  }
+}
+
+/* --- UI events --- */
+form.addEventListener('submit', (e)=>{
+  e.preventDefault();
+  const val = text.value.trim();
+  if(!val) return;
+  text.value = '';
+  send(val);
+});
+
+startBtn.addEventListener('click', ()=>{
+  render('assistant', 'Leuk dat je stylingadvies zoekt! Wat is je **geslacht** (man of vrouw)?');
+});
+
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'Enter' && (e.ctrlKey || e.metaKey)){
+    e.preventDefault();
+    if(text.value.trim()) form.requestSubmit();
+  }
+});
+
+/* --- Eerste bericht renderen --- */
+render('assistant', history[1].content);
+</script>
+</body>
+</html>
